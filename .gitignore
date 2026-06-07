@@ -1,0 +1,7 @@
+# 敏感信息
+*.log
+*.db
+.env
+**/data/
+**/node_modules/
+.DS_Store

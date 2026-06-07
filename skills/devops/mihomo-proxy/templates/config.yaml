@@ -1,0 +1,224 @@
+# ============================================================
+# Mihomo (Clash Meta) 配置模板
+# 适用场景：中国大陆服务器，分流规则
+# - 国内流量 → DIRECT（直连）
+# - 国外/被墙 → 代理节点
+# ============================================================
+
+mixed-port: 7890
+allow-lan: false
+bind-address: '127.0.0.1'
+mode: rule
+log-level: info
+ipv6: true
+prefer-ipv6: true
+external-controller: '127.0.0.1:9090'
+find-process-mode: strict
+unified-delay: true
+tcp-concurrent: true
+geodata-mode: true
+geo-auto-update: true
+geo-update-interval: 24
+geox-url:
+    geoip: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat'
+    geosite: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat'
+    mmdb: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb'
+    asn: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb'
+    metadb: 'https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb'
+keep-alive-interval: 30
+keep-alive-idle: 120
+profile:
+    store-selected: true
+    store-fake-ip: true
+sniffer:
+    enable: true
+    force-dns-mapping: true
+    parse-pure-ip: true
+    override-destination: true
+    sniff: { HTTP: { ports: [80, 8080-8880], override-destination: true }, TLS: { ports: [443, 8443] }, QUIC: { ports: [443, 8443] } }
+    skip-domain: ['Mijia Cloud', +.push.apple.com]
+dns:
+    enable: true
+    prefer-h3: true
+    enhanced-mode: fake-ip
+    fake-ip-range: 198.18.0.1/16
+    default-nameserver: [223.5.5.5, 119.29.29.29]
+    nameserver: ['https://dns.cloudflare.com/dns-query', 'https://dns.google/dns-query']
+    proxy-server-nameserver: ['https://dns.alidns.com/dns-query']
+    nameserver-policy: { 'geosite:cn,geolocation-cn': ['https://doh.pub/dns-query', 'https://dns.alidns.com/dns-query'] }
+    fake-ip-filter:
+        - '*.lan'
+        - '*.local'
+        - '*.direct'
+        - '*.localhost'
+        - 'time.*.com'
+        - 'ntp.*.com'
+        - 'time.*.gov'
+        - 'time.*.apple.com'
+        - time.windows.com
+        - time.nist.gov
+        - '*.msftconnecttest.com'
+        - '*.msftncsi.com'
+        - localhost.ptlogin2.qq.com
+        - '*.cmpassport.com'
+        - '*.mcdn.bilivideo.cn'
+        - '*.battlenet.com.cn'
+        - +.wotgame.cn
+        - +.wggames.cn
+        - +.wowsgame.cn
+        - id6.me
+        - lens.l.google.com
+        - captive.apple.com
+        - connectivitycheck.gstatic.com
+
+# ------------------------------------------------------------
+# 代理节点 - 由订阅刷新脚本自动更新
+# 替换为你的订阅节点
+# ------------------------------------------------------------
+proxies:
+    - { name: '🇺🇸美国 01', type: vless, server: us1.example.com, port: 443, uuid: YOUR-UUID, alterId: 0, cipher: auto, udp: true, flow: xtls-rprx-vision, encryption: none, tls: true, skip-cert-verify: false, servername: download-porter.hoyoverse.com, reality-opts: { public-key: YOUR-PUBKEY, short-id: YOUR-SHORTID }, client-fingerprint: chrome, network: tcp }
+    - { name: '🇸🇬新加坡 01', type: vless, server: sg1.example.com, port: 443, uuid: YOUR-UUID, alterId: 0, cipher: auto, udp: true, flow: xtls-rprx-vision, encryption: none, tls: true, skip-cert-verify: false, servername: sg-hyp-api.hoyoverse.com, reality-opts: { public-key: YOUR-PUBKEY, short-id: YOUR-SHORTID }, client-fingerprint: chrome, network: tcp }
+    - { name: '🇯🇵日本 01', type: vless, server: jp1.example.com, port: 443, uuid: YOUR-UUID, alterId: 0, cipher: auto, udp: true, flow: xtls-rprx-vision, encryption: none, tls: true, skip-cert-verify: false, servername: www.capcom.co.jp, reality-opts: { public-key: YOUR-PUBKEY, short-id: YOUR-SHORTID }, client-fingerprint: chrome, network: tcp }
+    - { name: '🇭🇰香港 01', type: vless, server: hk1.example.com, port: 443, uuid: YOUR-UUID, alterId: 0, cipher: auto, udp: true, flow: xtls-rprx-vision, encryption: none, tls: true, skip-cert-verify: false, servername: www.microsoft.com, reality-opts: { public-key: YOUR-PUBKEY, short-id: YOUR-SHORTID }, client-fingerprint: chrome, network: tcp }
+    - { name: '🇹🇼台湾 01', type: vless, server: tw1.example.com, port: 443, uuid: YOUR-UUID, alterId: 0, cipher: auto, udp: true, flow: xtls-rprx-vision, encryption: none, tls: true, skip-cert-verify: false, servername: blzddist1-a.akamaihd.net, reality-opts: { public-key: YOUR-PUBKEY, short-id: YOUR-SHORTID }, client-fingerprint: chrome, network: tcp }
+    # 注意: servername, reality-opts.public-key, reality-opts.short-id 每个节点都不同
+
+# ------------------------------------------------------------
+# 代理组
+# ------------------------------------------------------------
+proxy-groups:
+    - name: 节点选择
+      type: select
+      proxies:
+          - 自动选择
+          - 🇺🇸美国 01
+          - 🇸🇬新加坡 01
+          - 🇯🇵日本 01
+          - 🇭🇰香港 01
+          - 🇹🇼台湾 01
+          # ... 实际使用时有更多节点
+
+    - name: 自动选择
+      type: url-test
+      url: 'http://cp.cloudflare.com/generate_204'
+      interval: 300
+      tolerance: 50
+      hidden: true
+      exclude-filter: '\\[Home\\]'
+      proxies:
+          - 🇺🇸美国 01
+          - 🇸🇬新加坡 01
+          - 🇯🇵日本 01
+          - 🇭🇰香港 01
+          - 🇹🇼台湾 01
+          # ... 排除 [Home] 标签的节点
+
+# ------------------------------------------------------------
+# 规则提供者
+# ------------------------------------------------------------
+rule-providers:
+    overseas-ai:
+        type: http
+        behavior: classical
+        # 国内服务器用 jsdelivr CDN 镜像，raw.githubusercontent.com 被墙
+        url: 'https://cdn.jsdelivr.net/gh/viewer12/OverseasAI.list@main/rule/Clash/OverseasAI/OverseasAI.list'
+        path: ./ruleset/overseas-ai.list
+        interval: 86400
+        format: text
+
+# ------------------------------------------------------------
+# 分流规则
+# 规则从上到下顺序匹配，命中即停止
+# ------------------------------------------------------------
+rules:
+    # === 本地网络 - 直连 ===
+    - 'DOMAIN,feed1.chitanda-eru.com,DIRECT'
+    - 'GEOSITE,private,DIRECT'
+    - 'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve'
+    - 'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve'
+    - 'IP-CIDR,172.16.0.0/12,DIRECT,no-resolve'
+    - 'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve'
+    - 'IP-CIDR,100.64.0.0/10,DIRECT,no-resolve'
+    - 'IP-CIDR,169.254.0.0/16,DIRECT,no-resolve'
+    - 'IP-CIDR6,::1/128,DIRECT,no-resolve'
+    - 'IP-CIDR6,fc00::/7,DIRECT,no-resolve'
+    - 'IP-CIDR6,fe80::/10,DIRECT,no-resolve'
+
+    # === 阻断 STUN（防 WebRTC 泄漏真实 IP） ===
+    - 'DST-PORT,3478,REJECT'
+    - 'DST-PORT,3479,REJECT'
+    - 'DST-PORT,5349,REJECT'
+    - 'DST-PORT,5350,REJECT'
+    - 'DST-PORT,19302,REJECT'
+    - 'DST-PORT,19303,REJECT'
+    - 'DST-PORT,19304,REJECT'
+    - 'DST-PORT,19305,REJECT'
+    - 'DST-PORT,19306,REJECT'
+    - 'DST-PORT,19307,REJECT'
+    - 'DST-PORT,19308,REJECT'
+    - 'DST-PORT,19309,REJECT'
+    - 'DOMAIN-SUFFIX,stun.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun.miwifi.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun.l.google.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun1.l.google.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun2.l.google.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun3.l.google.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun4.l.google.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun.services.mozilla.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun.cloudflare.com,REJECT'
+    - 'DOMAIN-SUFFIX,turn.speed.cloudflare.com,REJECT'
+    - 'DOMAIN-SUFFIX,global.turn.twilio.com,REJECT'
+    - 'DOMAIN-SUFFIX,turn.twilio.com,REJECT'
+    - 'DOMAIN-SUFFIX,stun.stunprotocol.org,REJECT'
+    - 'DOMAIN-SUFFIX,stun.ekiga.net,REJECT'
+    - 'DOMAIN-SUFFIX,stun.nextcloud.com,REJECT'
+    - 'DOMAIN-SUFFIX,relay.metered.ca,REJECT'
+    - 'DOMAIN-SUFFIX,openrelay.metered.ca,REJECT'
+    - 'DOMAIN-SUFFIX,xirsys.com,REJECT'
+    - 'DOMAIN-SUFFIX,freestun.net,REJECT'
+    - 'DOMAIN-SUFFIX,freeturn.net,REJECT'
+    - 'DOMAIN-SUFFIX,turnix.io,REJECT'
+
+    # === 广告/追踪 - REJECT ===
+    - 'GEOSITE,category-ads-all,REJECT'
+    - 'DOMAIN-SUFFIX,trace.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,beacon.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,report.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,pingtas.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,pingtcss.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,stats.g.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,isdspeed.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,tp.linksgo.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,webpush.wx.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,mi.gdt.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,t.gdt.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,e.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,l.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,btrace.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,gdt.qq.com,REJECT'
+    - 'DOMAIN-SUFFIX,pgdt.gtimg.cn,REJECT'
+    - 'DOMAIN-SUFFIX,adsmind.gdtimg.com,REJECT'
+
+    # === 境外/AI 服务 - 走代理 ===
+    - 'RULE-SET,overseas-ai,节点选择'
+    - 'DOMAIN-SUFFIX,googleapis.cn,节点选择'
+    - 'DOMAIN-SUFFIX,xn--ngstr-lra8j.com,节点选择'
+    - 'DOMAIN-SUFFIX,ggpht.com,节点选择'
+    - 'DOMAIN-SUFFIX,googleusercontent.com,节点选择'
+    - 'DOMAIN-SUFFIX,gstatic.com,节点选择'
+    - 'GEOSITE,google,节点选择'
+    - 'GEOSITE,telegram,节点选择'
+    - 'GEOSITE,twitter,节点选择'
+    - 'GEOSITE,facebook,节点选择'
+    - 'GEOSITE,github,节点选择'
+
+    # === 国内流量 - 直连 ===
+    - 'GEOSITE,cn,DIRECT'
+    - 'GEOSITE,geolocation-cn,DIRECT'
+
+    # === 国外 IP/域名 - 走代理 ===
+    - 'GEOSITE,geolocation-!cn,节点选择'
+    - 'GEOIP,CN,DIRECT,no-resolve'
+
+    # === 兜底 ===
+    - 'MATCH,节点选择'

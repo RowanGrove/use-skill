@@ -1,0 +1,15 @@
+[Unit]
+Description=Mihomo Node Health Watchdog
+After=mihomo.service
+Requires=mihomo.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+ExecStart=/home/ubuntu/.config/mihomo/node-watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
