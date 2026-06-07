@@ -31,10 +31,16 @@ npm install
 
 ### 2. 构建前端（Web UI 管理面板需要）
 
-npm workspaces 下 @types/react-dom 和 @vitejs/plugin-react 经常装不到正确位置，需要手动下载：
+npm workspaces 下 @types/react-dom 和 @vitejs/plugin-react 经常装不到正确位置，可以一键运行构建脚本：
 
 ```bash
-# 从 repo 根目录执行
+# 从项目根目录执行
+bash scripts/build-client.sh
+```
+
+或者手动操作：
+
+```bash
 mkdir -p client/node_modules/@types/react-dom
 curl -sL "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz" | tar xz --strip-components=1 -C client/node_modules/@types/react-dom
 
@@ -42,7 +48,7 @@ mkdir -p client/node_modules/@vitejs/plugin-react
 curl -sL "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.0.2.tgz" | tar xz --strip-components=1 -C client/node_modules/@vitejs/plugin-react
 
 cd client && npm run build && cd ..
-# 构建成功标志：dist/index.html 生成
+```
 ```
 
 ### 3. 配置 .env
@@ -129,12 +135,20 @@ hermes model           # 交互式选 custom:freellmapi -> 选具体模型
 # 或在会话中用 /model 切换
 ```
 
+## ⚠️ 安全警示：密钥保密
+
+- **`freellmapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`** 只是占位符
+- 真实的 API Key 在首次启动日志里，**绝对不要提交到任何仓库**
+- 复制 key 时只复制到配置文件中，用完即清空
+- 如果 key 泄露，立即删除 `server/data/freeapi.db` 重启重置
+- 配置 Hermes 时：`export KEY=实际key && hermes config set providers.freellmapi.api_key "$KEY" && unset KEY`
+
 ## 获取 API Key
 
 FreeLLMAPI 首次启动打印的才是 API Key，**不是 `.env` 里的 `ENCRYPTION_KEY`**：
 
 ```
-Your unified API key: freellmapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Your unified API key: freellmapi-6c2af3916941e0cee6933af19c2e69162e2d4243be0abb89
 ```
 
 - 从 `sudo journalctl -u freellmapi` 或首次启动日志里找
@@ -159,6 +173,7 @@ Your unified API key: freellmapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | 7 | FreeLLMAPI 能启动但路由报 "All models exhausted" | 没配任何提供商的 API Key | 去 Web UI 添加 Key（Groq、OpenRouter 等） |
 | 8 | EADDRINUSE port 3001 | 旧进程残留 | `fuser -k 3001/tcp` 或 `sudo systemctl restart freellmapi` |
 | 9 | 国内服务器连不上境外 API | Telegram/OpenRouter 等被墙 | systemd 服务加 `HTTP_PROXY=http://127.0.0.1:7890`，依赖 `mihomo.service` |
+| ⚠️ | Groq Key 总是显示 invalid | Node.js `fetch()` 不认 `HTTP_PROXY`，健康检查没走代理被墙 | 装 `undici` + 写 `proxy-preload.cjs` + systemd 加 `NODE_OPTIONS="--require .../proxy-preload.cjs"` |
 
 ## 推荐注册的提供商
 
