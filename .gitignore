@@ -1,7 +1,23 @@
-# 敏感信息
+# *** 敏感信息 - 绝对不要提交 ***
 *.log
 *.db
 .env
+.env.*
 **/data/
 **/node_modules/
 .DS_Store
+# 凭证文件
+*.pem
+*.key
+*.p12
+*.cert
+*credentials*
+.git-credentials
+.ssh/
+# 注意：*token*、*secret*、*password*、*api_key* 不能用全局通配
+# （会误伤 skill 文件中的正常内容）
+# 改用具体文件名模式：
+.env
+.env.*
+config.yaml.backup
+*.private.*
