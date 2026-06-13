@@ -246,12 +246,11 @@ def main():
     state["models_disabled"] = models_disabled_new
     json.dump(state, open(STATE_FILE, "w"))
 
-    # Restart FreeLLMAPI if any model changes were made
+    # Restart FreeLLMAPI if any model changes were made — NO!
+    # DB 修改即时生效，重启反而会被 FreeLLMAPI 的启动同步覆盖。
+    # 脚本改完就走，下个请求路由器就会跳过 enabled=0 的模型。
     if changes["model_disabled"] or changes["model_reenabled"]:
-        log("\n模型有变更，重启 FreeLLMAPI...")
-        subprocess.run(["sudo", "systemctl", "restart", "freellmapi"],
-                       capture_output=True, timeout=30)
-        log("重启完成")
+        log(f"\n模型有变更，DB 已更新（不重启，即时生效）")
 
     # Report
     log(f"\n📊 FreeLLMAPI 优化报告 v2 [模型级, {RANGE}]")
