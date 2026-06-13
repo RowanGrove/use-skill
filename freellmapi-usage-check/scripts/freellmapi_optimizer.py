@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
 """
-FreeLLMAPI Auto-Optimizer — Hermes cron script
-Checks analytics, disables providers <30% success, re-enables recovered ones.
-Runs 3x daily, uses 24h rolling window.
+FreeLLMAPI Auto-Optimizer v2 — 模型级优化
+检查每个模型的错误分布，只禁失败的模型，保留能用的。
+每日 8/16/23 点跑，24h 滚动窗口。
 
-Logic:
-  - Has data (>=MIN_OBS) + success < THRESHOLD  → disable
-  - Disabled by us + has data + success >= THRESHOLD → re-enable
-  - Disabled by us + NO data (because we disabled it) → run health check
-    - Healthy → re-enable (give it a chance with real traffic)
-    - Unhealthy → keep disabled
+逻辑：
+  1. 获取错误分布 — 哪些 (platform, model_id) 在过去 24h 报过错
+  2. 遍历所有平台的每个模型：
+     - 有错误 → 直接 sqlite 禁用该模型
+     - 没错误 → 直接 sqlite 启用该模型（给机会，或是原本就好的）
+  3. 每个平台检查：至少一个模型启用 → 确保平台 Key 启用；零模型启用 → 确保平台 Key 禁用
+  4. 带防抖：同一模型被反复禁用会延长冷却期
 """
-import urllib.request, json, os, sys, traceback
+import urllib.request, json, os, sys, subprocess, time, traceback
 
 BASE = os.environ.get("FREEML_BASE", "http://127.0.0.1:3001")
 CRED_FILE = os.path.expanduser("~/.freellmapi_cred.json")
 STATE_FILE = os.path.expanduser("~/.freellmapi_optimizer_state.json")
-THRESHOLD = 30       # success rate %
-MIN_OBS = 5           # min requests to make a decision
+DB_PATH = os.path.expanduser("~/freellmapi/server/data/freeapi.db")
 RANGE = "24h"
+
+# 防抖：同一模型/平台反复禁用时指数增加冷却
+COOLDOWN_BASE = 86400       # 1 天（秒）
+COOLDOWN_MAX = 604800       # 7 天（秒）
+ERROR_PER_MODEL = 1          # 模型只要有 1 次报错就禁用
+ERROR_THRESHOLD_PLATFORM = 5 # 平台级别至少 5 次报错才禁整个平台
 
 def log(msg):
     print(msg, flush=True)
 
+def db_update(sql):
+    """Run SQL on FreeLLMAPI database."""
+    subprocess.run(["sqlite3", DB_PATH, sql], capture_output=True, check=True)
+
 def main():
     # 0. Credentials
     if not os.path.exists(CRED_FILE):
-        log(f"[ERROR] Credentials file {CRED_FILE} not found")
+        log("[ERROR] Credentials file not found")
         sys.exit(1)
     try:
         creds = json.load(open(CRED_FILE))
@@ -35,13 +45,20 @@ def main():
         log(f"[ERROR] Failed to read credentials: {e}")
         sys.exit(1)
 
-    # 1. Load state
-    state = {"disabled_by_optimizer": []}
+    # 1. Load state (handle old format migration)
+    state = {"models_disabled": {}, "platforms_fixed": []}
     if os.path.exists(STATE_FILE):
         try:
             state = json.load(open(STATE_FILE))
+            # Migrate from old format (platform-level) to new (model-level)
+            if "disabled_by_optimizer" in state and not state.get("models_disabled"):
+                log(f"[MIGRATE] Old state found with {len(state['disabled_by_optimizer'])} platforms, resetting to model-level")
+                state["models_disabled"] = {}
+                state["platforms_fixed"] = []
         except Exception:
             log("[WARN] State file corrupt, resetting")
+
+    now = int(time.time())
 
     # 2. Login
     try:
@@ -55,16 +72,40 @@ def main():
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    # 3. Analytics by platform
+    # 3. Error distribution (24h)
     try:
         req = urllib.request.Request(
-            f"{BASE}/api/analytics/by-platform?range={RANGE}", headers=headers)
-        platforms = json.loads(urllib.request.urlopen(req, timeout=30).read())
+            f"{BASE}/api/analytics/error-distribution?range={RANGE}", headers=headers)
+        err_data = json.loads(urllib.request.urlopen(req, timeout=30).read())
     except Exception as e:
-        log(f"[ERROR] Analytics fetch failed: {e}")
+        log(f"[ERROR] Error distribution fetch failed: {e}")
         sys.exit(1)
 
-    # 4. Keys list (maps platform name → key info, including key_id)
+    # Build: set of (platform, model_id) with errors, count per (platform, model_id)
+    error_models = {}  # (platform, model_id) -> total_errors
+    error_platforms = {}  # platform -> total_errors
+    for e in err_data.get("detailed", []):
+        key = (e["platform"], e["model_id"])
+        error_models[key] = error_models.get(key, 0) + e["count"]
+        error_platforms[e["platform"]] = error_platforms.get(e["platform"], 0) + e["count"]
+
+    log(f"报错涉及 {len(set(p for p,_ in error_models))} 个平台, {len(error_models)} 个模型")
+
+    # 4. All models
+    try:
+        req = urllib.request.Request(f"{BASE}/api/models", headers=headers)
+        all_models = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    except Exception as e:
+        log(f"[ERROR] Models fetch failed: {e}")
+        sys.exit(1)
+
+    # Group by platform
+    platform_models = {}
+    for m in all_models:
+        p = m["platform"]
+        platform_models.setdefault(p, []).append(m)
+
+    # 5. Keys list
     try:
         req = urllib.request.Request(f"{BASE}/api/keys", headers=headers)
         keys = json.loads(urllib.request.urlopen(req, timeout=15).read())
@@ -73,133 +114,181 @@ def main():
         sys.exit(1)
 
     key_map = {k["platform"]: k for k in keys}
-    analytics_map = {p["platform"]: p for p in platforms}
 
-    changes = {"disabled": [], "reenabled": [], "health_reenabled": [],
-               "health_kept_disabled": [], "other": []}
+    # 6. Process each platform's models
+    changes = {"model_disabled": [], "model_reenabled": [],
+               "platform_enabled": [], "platform_disabled": [],
+               "cooldown_skip": []}
 
-    all_disabled_by_optimizer = list(state["disabled_by_optimizer"])
+    models_disabled_new = {}  # will replace state["models_disabled"]
 
-    for platform_name in all_disabled_by_optimizer:
-        if platform_name not in key_map:
-            changes["other"].append(f"{platform_name} (no longer in keys, removing from tracker)")
-            state["disabled_by_optimizer"].remove(platform_name)
-            continue
-        key = key_map[platform_name]
-        if key.get("enabled", True):
-            state["disabled_by_optimizer"].remove(platform_name)
-            changes["other"].append(f"{platform_name} (manually re-enabled, tracker cleared)")
+    for platform in sorted(platform_models.keys()):
+        if platform not in key_map:
             continue
 
-        pdata = analytics_map.get(platform_name, {})
-        req_count = pdata.get("requests", 0)
-        success_rate = pdata.get("successRate", 0)
+        models = platform_models[platform]
+        if not models:
+            continue
 
-        if req_count >= MIN_OBS:
-            if success_rate >= THRESHOLD:
+        platform_total_errors = error_platforms.get(platform, 0)
+        working = 0
+        broken = 0
+        cooldown_skipped = 0
+
+        for m in models:
+            mid = m["id"]
+            model_id = m["modelId"]
+            currently_enabled = m["enabled"]
+            err_count = error_models.get((platform, model_id), 0)
+            state_key = f"{platform}/{model_id}"
+
+            if err_count >= ERROR_PER_MODEL:
+                # Model has errors → disable
+                if currently_enabled:
+                    try:
+                        db_update(f"UPDATE models SET enabled=0 WHERE id={mid}")
+                        changes["model_disabled"].append(f"{platform}/{model_id} ({err_count} errors)")
+                    except Exception as e:
+                        log(f"[ERROR] DB disable {platform}/{model_id}: {e}")
+
+                # Update cooldown: when this model was last disabled
+                prev = state["models_disabled"].get(state_key, {})
+                prev_count = prev.get("count", 0)
+                models_disabled_new[state_key] = {
+                    "disabled_at": now,
+                    "count": prev_count + 1,
+                    "reenable_after": now + min(COOLDOWN_BASE * (prev_count + 1), COOLDOWN_MAX)
+                }
+                broken += 1
+
+            else:
+                # No errors → should be enabled
+                # But check cooldown if it was previously disabled by us
+                prev = state["models_disabled"].get(state_key, {})
+                if prev and not currently_enabled:
+                    # Was disabled by us — check cooldown
+                    if now < prev.get("reenable_after", 0):
+                        cooldown_skipped += 1
+                        changes["cooldown_skip"].append(
+                            f"{platform}/{model_id} (冷却中, 还剩 {(prev['reenable_after'] - now)//3600}h)")
+                        continue  # Keep disabled during cooldown
+
+                # No cooldown or cooldown expired → enable
+                if not currently_enabled:
+                    try:
+                        db_update(f"UPDATE models SET enabled=1 WHERE id={mid}")
+                        changes["model_reenabled"].append(f"{platform}/{model_id}")
+                    except Exception as e:
+                        log(f"[ERROR] DB enable {platform}/{model_id}: {e}")
+
+                working += 1
+
+        # Now decide platform key status
+        if working > 0:
+            if not key_map[platform].get("enabled", True):
                 try:
                     patch = json.dumps({"enabled": True}).encode()
                     req = urllib.request.Request(
-                        f"{BASE}/api/keys/platform/{platform_name}",
+                        f"{BASE}/api/keys/platform/{platform}",
                         data=patch, method="PATCH",
                         headers=headers | {"Content-Type": "application/json"})
                     urllib.request.urlopen(req, timeout=10)
-                    changes["reenabled"].append(
-                        f"{platform_name} ({success_rate}% on {req_count} req)")
-                    state["disabled_by_optimizer"].remove(platform_name)
+                    changes["platform_enabled"].append(
+                        f"{platform} ({working} working of {len(models)} models)")
                 except Exception as e:
-                    log(f"[ERROR] Re-enable {platform_name} failed: {e}")
-            else:
-                changes["other"].append(
-                    f"{platform_name} (still {success_rate}% on {req_count} req, keeping disabled)")
+                    log(f"[ERROR] Enable platform {platform}: {e}")
         else:
-            key_id = key.get("id")
-            if key_id is None:
-                changes["other"].append(f"{platform_name} (no key_id, can't health-check)")
-                continue
-            try:
-                req = urllib.request.Request(
-                    f"{BASE}/api/health/check/{key_id}",
-                    method="POST", headers=headers)
-                health = json.loads(urllib.request.urlopen(req, timeout=30).read())
-                status = health.get("status", "unknown")
-                if status == "healthy":
-                    patch = json.dumps({"enabled": True}).encode()
-                    req = urllib.request.Request(
-                        f"{BASE}/api/keys/platform/{platform_name}",
-                        data=patch, method="PATCH",
-                        headers=headers | {"Content-Type": "application/json"})
-                    urllib.request.urlopen(req, timeout=10)
-                    changes["health_reenabled"].append(
-                        f"{platform_name} (health=healthy, giving another chance)")
-                    state["disabled_by_optimizer"].remove(platform_name)
-                else:
-                    changes["health_kept_disabled"].append(
-                        f"{platform_name} (health={status}, keeping disabled)")
-            except Exception as e:
-                log(f"[ERROR] Health check {platform_name} failed: {e}")
-                changes["health_kept_disabled"].append(
-                    f"{platform_name} (health check error, keeping disabled)")
+            # Zero working models — disable the platform
+            # But only if it has enough total errors to not be a fluke
+            if platform_total_errors >= ERROR_THRESHOLD_PLATFORM:
+                if key_map[platform].get("enabled", True):
+                    try:
+                        patch = json.dumps({"enabled": False}).encode()
+                        req = urllib.request.Request(
+                            f"{BASE}/api/keys/platform/{platform}",
+                            data=patch, method="PATCH",
+                            headers=headers | {"Content-Type": "application/json"})
+                        urllib.request.urlopen(req, timeout=10)
+                        changes["platform_disabled"].append(
+                            f"{platform} (0 working models, {platform_total_errors} total errors)")
+                    except Exception as e:
+                        log(f"[ERROR] Disable platform {platform}: {e}")
+            else:
+                log(f"[SKIP] {platform}: 0 working but only {platform_total_errors} total errors, keeping as-is")
 
-    # Check all platforms for NEW platforms to disable
-    for p in platforms:
-        platform_name = p["platform"]
-        req_count = p["requests"]
-        success_rate = p["successRate"]
+        if cooldown_skipped > 0:
+            log(f"  {platform}: {cooldown_skipped} model(s) in cooldown, skipped")
 
-        if platform_name not in key_map:
-            continue
-        if platform_name in state["disabled_by_optimizer"]:
-            continue
-        if not key_map[platform_name].get("enabled", True):
-            continue
+    # Save state (merge: keep models that weren't in this run + new ones)
+    # Actually replace entirely: models_disabled_new only has models we just disabled
+    # We also need to carry forward models from previous state that are still disabled in DB
+    # But the simplest is: models_disabled_new has current state of all disabled-by-us models
+    # And we keep entries for models not seen in this run but still in DB disabled state
+    for state_key, prev_data in state["models_disabled"].items():
+        if state_key not in models_disabled_new:
+            # Check if this model is still disabled in DB
+            parts = state_key.split("/", 1)
+            if len(parts) == 2:
+                p, mid_name = parts
+                # Check current DB state
+                try:
+                    result = subprocess.run(
+                        ["sqlite3", DB_PATH,
+                         f"SELECT enabled FROM models WHERE platform='{p}' AND model_id='{mid_name}'"],
+                        capture_output=True, text=True, timeout=5)
+                    db_enabled = result.stdout.strip()
+                    if db_enabled == "0":
+                        # Still disabled in DB — carry forward the state
+                        models_disabled_new[state_key] = prev_data
+                except Exception:
+                    pass
 
-        if req_count >= MIN_OBS and success_rate < THRESHOLD:
-            try:
-                patch = json.dumps({"enabled": False}).encode()
-                req = urllib.request.Request(
-                    f"{BASE}/api/keys/platform/{platform_name}",
-                    data=patch, method="PATCH",
-                    headers=headers | {"Content-Type": "application/json"})
-                urllib.request.urlopen(req, timeout=10)
-                changes["disabled"].append(
-                    f"{platform_name} ({success_rate}% on {req_count} req)")
-                state["disabled_by_optimizer"].append(platform_name)
-            except Exception as e:
-                log(f"[ERROR] Disable {platform_name} failed: {e}")
-
+    state["models_disabled"] = models_disabled_new
     json.dump(state, open(STATE_FILE, "w"))
 
-    log(f"FreeLLMAPI 优化报告 [{RANGE} 窗口]")
-    log(f"检查了 {len(platforms)} 个平台, {len(state['disabled_by_optimizer'])} 个正被禁用")
+    # Restart FreeLLMAPI if any model changes were made
+    if changes["model_disabled"] or changes["model_reenabled"]:
+        log("\n模型有变更，重启 FreeLLMAPI...")
+        subprocess.run(["sudo", "systemctl", "restart", "freellmapi"],
+                       capture_output=True, timeout=30)
+        log("重启完成")
 
-    if changes["disabled"]:
-        log(f"新禁用（成功率 <{THRESHOLD}%, 请求 >= {MIN_OBS}）:")
-        for c in changes["disabled"]:
-            log(f"  - {c}")
+    # Report
+    log(f"\n📊 FreeLLMAPI 优化报告 v2 [模型级, {RANGE}]")
 
-    if changes["reenabled"]:
-        log(f"已恢复（数据表明已恢复）:")
-        for c in changes["reenabled"]:
-            log(f"  - {c}")
+    if changes["model_disabled"]:
+        log(f"\n🚫 禁用失败模型 ({len(changes['model_disabled'])}):")
+        for c in changes["model_disabled"]:
+            log(f"  • {c}")
 
-    if changes["health_reenabled"]:
-        log(f"健康检查通过，恢复启用:")
-        for c in changes["health_reenabled"]:
-            log(f"  - {c}")
+    if changes["model_reenabled"]:
+        log(f"\n✅ 恢复模型 ({len(changes['model_reenabled'])}):")
+        for c in changes["model_reenabled"]:
+            log(f"  • {c}")
 
-    if changes["health_kept_disabled"]:
-        log(f"健康检查未通过，保持禁用:")
-        for c in changes["health_kept_disabled"]:
-            log(f"  - {c}")
+    if changes["platform_enabled"]:
+        log(f"\n🔛 启用平台:")
+        for c in changes["platform_enabled"]:
+            log(f"  • {c}")
 
-    if changes["other"]:
-        log(f"其他:")
-        for c in changes["other"]:
-            log(f"  - {c}")
+    if changes["platform_disabled"]:
+        log(f"\n🔴 禁用平台（无可用模型）:")
+        for c in changes["platform_disabled"]:
+            log(f"  • {c}")
 
+    if changes["cooldown_skip"]:
+        log(f"\n⏳ 冷却中（暂不恢复）:")
+        for c in changes["cooldown_skip"][:10]:
+            log(f"  • {c}")
+        if len(changes["cooldown_skip"]) > 10:
+            log(f"  ... 还有 {len(changes['cooldown_skip'])-10} 个")
+
+    # Stats
+    total_disabled = len(state["models_disabled"])
+    log(f"\n━━━━━━━━━━━━━━━━━━━━")
+    log(f"当前管理 {total_disabled} 个禁用模型")
     if not any(changes.values()):
-        log("本轮无变化")
+        log(f"本轮无变化，所有平台状态正常")
 
 if __name__ == "__main__":
     try:
