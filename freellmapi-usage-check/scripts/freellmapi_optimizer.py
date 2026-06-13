@@ -23,8 +23,16 @@ RANGE = "24h"
 # 防抖：同一模型/平台反复禁用时指数增加冷却
 COOLDOWN_BASE = 86400       # 1 天（秒）
 COOLDOWN_MAX = 604800       # 7 天（秒）
-ERROR_PER_MODEL = 1          # 模型只要有 1 次报错就禁用
-ERROR_THRESHOLD_PLATFORM = 5 # 平台级别至少 5 次报错才禁整个平台
+ERROR_PER_MODEL = 5          # 24h 内错误≥5次才禁用（容忍临时波动）
+ERROR_THRESHOLD_PLATFORM = 10 # 平台级别至少 10 次报错才禁整个平台
+
+# 永久保护名单——这些模型永不自动禁用
+PROTECTED_MODELS = {
+    "custom/xopqwen36v35b",     # 讯飞星火限免
+    "google/gpt-4.1-nano",
+    "google/gpt-4.1-mini",
+    "google/gpt-4.1",
+}
 
 def log(msg):
     print(msg, flush=True)
@@ -141,6 +149,18 @@ def main():
             currently_enabled = m["enabled"]
             err_count = error_models.get((platform, model_id), 0)
             state_key = f"{platform}/{model_id}"
+
+            # 永久保护名单中的模型永不自动禁用
+            if state_key in PROTECTED_MODELS:
+                if not currently_enabled:
+                    # 万一被人为禁了，重新启用
+                    try:
+                        db_update(f"UPDATE models SET enabled=1 WHERE id={mid}")
+                        changes["model_reenabled"].append(f"{platform}/{model_id} [PROTECTED]")
+                    except Exception as e:
+                        log(f"[ERROR] DB enable PROTECTED {platform}/{model_id}: {e}")
+                working += 1
+                continue
 
             if err_count >= ERROR_PER_MODEL:
                 # Model has errors → disable
